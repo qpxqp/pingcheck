@@ -27,12 +27,13 @@ class PingColumn(StrEnum):
 # --- Config ---
 IN_USE_MARKER = '====='
 BASE_DIR = Path(__file__).parent
-RESULTS_DIR = BASE_DIR / 'results'
+RESULTS_DIR_NAME = 'results'
+RESULTS_DIR = BASE_DIR / RESULTS_DIR_NAME
 TMP_MARKER = '.tmp'
 DEFAULT_INPUT_FILE = BASE_DIR / 'ips.xlsx'
 DEFAULT_COLUMN_NAME = PingColumn.IP.value
-DEFAULT_PING_COUNT = 2
-DEFAULT_PING_TIMEOUT = 3
+DEFAULT_PING_COUNT = 3
+DEFAULT_PING_TIMEOUT = 2
 # Форматы timestamp.strftime
 FMT_OUTPUT_FILENAME = '%Y-%m-%d_%H-%M-%S'
 FMT_COL_NAME = '%Y-%m-%d %H:%M:%S'
@@ -270,7 +271,7 @@ def parse_args() -> argparse.Namespace:
         action='store_false',
         dest='write_report',
         default=True,
-        help='Не сохранять отчёт в `results/YYYY-MM-DD_hh-mm-ss.xlsx`',
+        help=f'Не сохранять отчёт в `{RESULTS_DIR_NAME}/...`',
     )
     parser.add_argument(
         '--no-append-source',
@@ -295,26 +296,21 @@ def main() -> int:
     args = parse_args()
     input_file = args.input_file
     column = args.column
-    count = args.count
-    timeout = args.timeout
-    privileged = args.privileged
-    write_report = args.write_report
-    append_source = args.append_source
     timestamp = datetime.now()
     logger.info('%s Process started %s', IN_USE_MARKER, IN_USE_MARKER)
     try:
         ips = read_ips_from_excel(input_file, column)
         results = ping_ips(
             ips,
-            count=count,
-            timeout=timeout,
-            privileged=privileged,
+            count=args.count,
+            timeout=args.timeout,
+            privileged=args.privileged,
             verbose=args.verbose,
         )
         if not results:
             logger.warning(LOG_NO_RESULTS)
             return 1
-        if write_report:
+        if args.write_report:
             save_results_to_excel(
                 RESULTS_DIR / make_output_filename(timestamp),
                 results=results,
@@ -323,7 +319,7 @@ def main() -> int:
             logger.info(
                 'Запись отчёта в `results/...` отключена (--no-report)'
             )
-        if append_source:
+        if args.append_source:
             append_result_to_source(input_file, column, results, timestamp)
         else:
             logger.info(
