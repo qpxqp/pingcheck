@@ -36,7 +36,7 @@ DEFAULT_PING_TIMEOUT = 3
 # Форматы timestamp.strftime
 FMT_OUTPUT_FILENAME = '%Y-%m-%d_%H-%M-%S'
 FMT_COL_NAME = '%Y-%m-%d %H:%M:%S'
-FMT_LOGGING = '%Y-%m%d-%H:%M:%S'
+FMT_LOGGING = '%Y-%m-%d %H:%M:%S'
 # Данные этого столбца будут добавлены в новый столбец в источник
 APPEND_DATA = PingColumn.SUCCESS_PCT
 
