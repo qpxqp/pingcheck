@@ -21,6 +21,7 @@ class PingColumn(StrEnum):
     MAX_RTT = 'max_rtt'
     JITTER = 'jitter'
     PACKET_LOSS = 'packet_loss'
+    WARNINGS = 'warnings'
 
 
 # --- Config ---
@@ -29,13 +30,13 @@ BASE_DIR = Path(__file__).parent
 RESULTS_DIR = BASE_DIR / 'results'
 TMP_MARKER = '.tmp'
 DEFAULT_INPUT_FILE = BASE_DIR / 'ips.xlsx'
-DEFAULT_COLUMN_NAME = 'ip'
+DEFAULT_COLUMN_NAME = PingColumn.IP.value
 DEFAULT_PING_COUNT = 2
 DEFAULT_PING_TIMEOUT = 3
 # Форматы timestamp.strftime
 FMT_OUTPUT_FILENAME = '%Y-%m-%d_%H-%M-%S'
 FMT_COL_NAME = '%Y-%m-%d %H:%M:%S'
-FMT_LOGGING = '%Y-%m %d-%H:%M:%S'
+FMT_LOGGING = '%Y-%m%d-%H:%M:%S'
 # Данные этого столбца будут добавлены в новый столбец в источник
 APPEND_DATA = PingColumn.SUCCESS_PCT
 
@@ -73,6 +74,20 @@ def make_output_filename(timestamp: datetime) -> str:
     return timestamp.strftime(FMT_OUTPUT_FILENAME) + '.xlsx'
 
 
+def normalize_ip(ip: str) -> str:
+    """Убирает ведущие нули в октетах IPv4: '192.168.001.001'->'192.168.1.1'.
+
+    Возвращает исходную строку, если это не похоже на IPv4.
+    """
+    parts = ip.strip().split('.')
+    if len(parts) != 4:
+        return ip
+    try:
+        return '.'.join(str(int(p)) for p in parts)
+    except ValueError:
+        return ip
+
+
 def read_ips_from_excel(path: Path, column: str) -> tuple[str, ...]:
     """Читает IP-адреса из указанного столбца Excel-файла.
 
@@ -101,9 +116,10 @@ def ping_ips(
     if not ips:
         logger.warning('Список IP пуст — пинговать нечего')
         return ()
+    normalized = [normalize_ip(ip) for ip in ips]
     logger.info('Пинг %d адресов...', len(ips))
     hosts = multiping(
-        addresses=ips,
+        addresses=normalized,
         count=count,
         timeout=timeout,
         privileged=privileged,
@@ -111,13 +127,17 @@ def ping_ips(
     results: list[dict] = []
     success = 0
     failed = 0
-    for host in hosts:
+    for orig, norm, host in zip(ips, normalized, hosts, strict=True):
+        if host.address != norm:
+            raise RuntimeError(
+                f'Порядок нарушен: ожидали `{norm}`, получили `{host.address}`'
+            )
         sent = getattr(host, 'packets_sent', 0)
         recv = getattr(host, 'packets_received', 0)
         pct = round(recv / sent * 100) if sent else 0
         is_alive = recv > 0
         results.append({
-            PingColumn.IP: host.address,
+            PingColumn.IP: orig,
             PingColumn.ALIVE: is_alive,
             PingColumn.SUCCESS_PCT: pct,
             PingColumn.PING_COUNT: count,
@@ -126,6 +146,11 @@ def ping_ips(
             PingColumn.JITTER: getattr(host, 'jitter', None),
             PingColumn.MAX_RTT: getattr(host, 'max_rtt', None),
             PingColumn.MIN_RTT: getattr(host, 'min_rtt', None),
+            PingColumn.WARNINGS: (
+                f'IP нормализован для пинга: `{orig}` -> `{norm}`'
+                if orig != norm else
+                None
+            ),
         })
         if is_alive:
             success += 1
@@ -150,6 +175,7 @@ def save_results_to_excel(path: Path, results: tuple[dict, ...]) -> bool:
         PingColumn.IP, PingColumn.ALIVE, PingColumn.SUCCESS_PCT,
         PingColumn.PING_COUNT, PingColumn.AVG_RTT, PingColumn.MIN_RTT,
         PingColumn.MAX_RTT, PingColumn.JITTER, PingColumn.PACKET_LOSS,
+        PingColumn.WARNINGS,
     ])
     # RTT — числа с плавающей точкой; None останется NaN
     for col in (PingColumn.AVG_RTT, PingColumn.MIN_RTT, PingColumn.MAX_RTT,
@@ -232,7 +258,10 @@ def parse_args() -> argparse.Namespace:
         action='store_false',
         dest='privileged',
         default=True,
-        help='Использовать UDP вместо ICMP (не требует прав администратора)',
+        help=(
+            'Использовать UDP вместо ICMP '
+            '(не требует прав администратора для Linux/macOS)'
+        ),
     )
     parser.add_argument(
         '--no-report',
@@ -313,7 +342,7 @@ def main() -> int:
         )
         return 1
     except Exception:
-        logger.exception('Непредвиденная ошибка')
+        logger.exception('Непредвиденная ошибка:')
         return 2
     finally:
         logger.info('%s Process finished %s', IN_USE_MARKER, IN_USE_MARKER)

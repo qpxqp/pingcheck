@@ -86,6 +86,7 @@ def test_save_results_creates_dir_and_file(tmp_path: Path):
         pc.PingColumn.MAX_RTT: 1.0,
         pc.PingColumn.JITTER: None,
         pc.PingColumn.PACKET_LOSS: 0.0,
+        pc.PingColumn.WARNINGS: None,
     },)
     assert pc.save_results_to_excel(path, results) is True
     assert path.exists()
@@ -93,6 +94,7 @@ def test_save_results_creates_dir_and_file(tmp_path: Path):
     assert list(df.columns) == [
         'ip', 'alive', 'success_pct', 'ping_count',
         'avg_rtt', 'min_rtt', 'max_rtt', 'jitter', 'packet_loss',
+        'warnings',
     ]
     assert df.iloc[0]['ip'] == '8.8.8.8'
 
