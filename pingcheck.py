@@ -111,6 +111,7 @@ def ping_ips(
     count: int = DEFAULT_PING_COUNT,
     timeout: int = DEFAULT_PING_TIMEOUT,
     privileged: bool = True,
+    verbose: bool = False,
 ) -> tuple[dict, ...]:
     """Пингует IP-адреса и возвращает кортеж словарей."""
     if not ips:
@@ -127,6 +128,7 @@ def ping_ips(
     results: list[dict] = []
     success = 0
     failed = 0
+    log = logger.info if verbose else logger.debug
     for orig, norm, host in zip(ips, normalized, hosts, strict=True):
         if host.address != norm:
             raise RuntimeError(
@@ -158,7 +160,7 @@ def ping_ips(
         else:
             failed += 1
             is_alive_msg = 'FAIL'
-        logger.debug('%-20s %s', host.address, is_alive_msg)
+        log('%-20s %s', orig, is_alive_msg)
     logger.info('Успешно: %d', success)
     logger.info('Неуспешно: %d', failed)
     return tuple(results)
@@ -280,6 +282,11 @@ def parse_args() -> argparse.Namespace:
             'с результатами в исходный файл'
         ),
     )
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Показывать результат по каждому IP в логе',
+    )
     return parser.parse_args()
 
 
@@ -298,7 +305,11 @@ def main() -> int:
     try:
         ips = read_ips_from_excel(input_file, column)
         results = ping_ips(
-            ips, count=count, timeout=timeout, privileged=privileged,
+            ips,
+            count=count,
+            timeout=timeout,
+            privileged=privileged,
+            verbose=args.verbose,
         )
         if not results:
             logger.warning(LOG_NO_RESULTS)
