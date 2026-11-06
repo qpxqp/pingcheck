@@ -139,7 +139,7 @@ def safe_ping_hosts(
     hosts_out: list[Any | None] = []
     errors_out: list[str | None] = []
     for n, chunk in enumerate(chunked(addresses, chunk_size), start=1):
-        logger.debug('Чанк %d из %d адресов',n, len(chunk))
+        logger.debug('Чанк %d из %d адресов', n, len(chunk))
         try:
             hosts = multiping(
                 addresses=chunk,
@@ -153,8 +153,8 @@ def safe_ping_hosts(
         except ICMPLibError as e:
             logger.warning(
                 'Групповой пинг не выполнен (%s), '
-                'пинг поштучно для чанка номер %d из %d адресов',
-                e, n, len(chunk)
+                'пинг поштучно для %d адресов из чанка номер %d',
+                e, len(chunk), n,
             )
         for addr in chunk:
             try:
@@ -211,7 +211,7 @@ def ping_ips(
                 PingColumn.IP: orig,
                 PingColumn.ALIVE: False,
                 PingColumn.SUCCESS_PCT: 0,
-                PingColumn.PING_COUNT: count,
+                PingColumn.PING_COUNT: 0,
                 PingColumn.AVG_RTT: None,
                 PingColumn.MIN_RTT: None,
                 PingColumn.MAX_RTT: None,
@@ -451,7 +451,11 @@ def main() -> int:
         logger.exception('Непредвиденная ошибка:')
         return 2
     finally:
-        logger.info('%s Process finished %s', IN_USE_MARKER, IN_USE_MARKER)
+        elapsed = (datetime.now() - timestamp).total_seconds()
+        logger.info(
+            '%s Process finished in %.2f sec %s',
+            IN_USE_MARKER, elapsed, IN_USE_MARKER,
+        )
     return 0
 
 

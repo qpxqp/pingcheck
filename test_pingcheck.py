@@ -4,17 +4,33 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from icmplib.exceptions import ICMPLibError
 
 import pingcheck as pc
 
-# --- make_output_filename ---
+# --- Утилиты ---
 
 def test_make_output_filename():
     ts = datetime(2026, 11, 4, 14, 5, 9)
     assert pc.make_output_filename(ts) == '2026-11-04_14-05-09.xlsx'
 
 
-# --- read_ips_from_excel ---
+def test_normalize_ip():
+    assert pc.normalize_ip('192.168.001.001') == '192.168.1.1'
+    assert pc.normalize_ip('8.8.8.8') == '8.8.8.8'
+    assert pc.normalize_ip('localhost') == 'localhost'
+    assert pc.normalize_ip('192.168.1') == '192.168.1'
+    assert pc.normalize_ip('hello.world.test') == 'hello.world.test'
+
+
+def test_chunked():
+    lst = [1, 2, 3, 4, 5]
+    chunks = list(pc.chunked(lst, 2))
+    assert chunks == [[1, 2], [3, 4], [5]]
+    assert list(pc.chunked([], 10)) == []
+
+
+# --- Чтение из Excel ---
 
 def test_read_ips_from_excel(tmp_path: Path):
     path = tmp_path / 'ips.xlsx'
@@ -31,10 +47,11 @@ def test_read_ips_missing_column(tmp_path: Path):
         pc.read_ips_from_excel(path, 'ip')
 
 
-# --- ping_ips (multiping замокан) ---
+# --- Хелперы для моков ---
 
 class FakeHost:
-    def __init__(self, address, sent, recv):
+    """Универсальный фейковый Host для тестов."""
+    def __init__(self, address, sent=1, recv=1):
         self.address = address
         self.packets_sent = sent
         self.packets_received = recv
@@ -44,6 +61,48 @@ class FakeHost:
         self.max_rtt = 1.0 if recv else None
         self.min_rtt = 1.0 if recv else None
 
+
+# --- safe_ping_hosts ---
+
+def test_safe_ping_hosts_success(monkeypatch):
+    def mock_multiping(addresses, **kwargs):
+        return [FakeHost(a) for a in addresses]
+
+    monkeypatch.setattr(pc, 'multiping', mock_multiping)
+    hosts, errors = pc.safe_ping_hosts(
+        ['8.8.8.8', '1.1.1.1'],
+        count=1, timeout=1, privileged=False, chunk_size=10
+    )
+    assert len(hosts) == 2
+    assert hosts[0].address == '8.8.8.8'
+    assert errors == [None, None]
+
+
+def test_safe_ping_hosts_fallback(monkeypatch):
+    # Групповой пинг всегда падает
+    def mock_multiping_fail(addresses, **kwargs):
+        raise ICMPLibError('Batch failed')
+    monkeypatch.setattr(pc, 'multiping', mock_multiping_fail)
+
+    # Поштучный пинг падает только на "bad.ip"
+    def mock_ping(addr, **kwargs):
+        if addr == 'bad.ip':
+            raise ICMPLibError('Cannot resolve')
+        return FakeHost(addr)
+
+    monkeypatch.setattr(pc, 'ping', mock_ping)
+    hosts, errors = pc.safe_ping_hosts(
+        ['8.8.8.8', 'bad.ip'],
+        count=1, timeout=1, privileged=False, chunk_size=10
+    )
+    assert len(hosts) == 2
+    assert hosts[0].address == '8.8.8.8'
+    assert hosts[1] is None
+    assert errors[0] is None
+    assert errors[1] == 'Cannot resolve'
+
+
+# --- ping_ips ---
 
 def test_ping_ips_empty():
     assert pc.ping_ips(()) == ()
@@ -62,11 +121,32 @@ def test_ping_ips_results(monkeypatch):
     assert by_ip['1.1.1.1'][pc.PingColumn.SUCCESS_PCT] == 50
     assert by_ip['10.0.0.1'][pc.PingColumn.SUCCESS_PCT] == 0
     assert by_ip['10.0.0.1'][pc.PingColumn.ALIVE] is False
-    # ping_count пробрасывается в каждый результат
     assert all(r[pc.PingColumn.PING_COUNT] == 2 for r in results)
 
 
-# --- save_results_to_excel ---
+def test_ping_ips_order_violation(monkeypatch):
+    def mock_safe_ping(addresses, **kwargs):
+        # Возвращаем хост, но с чужим IP
+        h = FakeHost('1.1.1.1')
+        return [h], [None]
+
+    monkeypatch.setattr(pc, 'safe_ping_hosts', mock_safe_ping)
+    with pytest.raises(RuntimeError, match='Порядок нарушен'):
+        pc.ping_ips(('8.8.8.8',), count=1, timeout=1, privileged=False)
+
+
+def test_ping_ips_hostname_resolve(monkeypatch):
+    def mock_safe_ping(addresses, **kwargs):
+        h = FakeHost('127.0.0.1')  # localhost резолвится
+        return [h], [None]
+
+    monkeypatch.setattr(pc, 'safe_ping_hosts', mock_safe_ping)
+    results = pc.ping_ips(('localhost',), count=1, timeout=1, privileged=False)
+    assert results[0][pc.PingColumn.IP] == 'localhost'
+    assert 'резолвлен в `127.0.0.1`' in results[0][pc.PingColumn.WARNINGS]
+
+
+# --- Сохранение результатов ---
 
 def test_save_results_empty(tmp_path: Path):
     path = tmp_path / 'out.xlsx'
@@ -99,7 +179,7 @@ def test_save_results_creates_dir_and_file(tmp_path: Path):
     assert df.iloc[0]['ip'] == '8.8.8.8'
 
 
-# --- append_result_to_source ---
+# --- Добавление в источник ---
 
 def test_append_result_to_source(tmp_path: Path):
     path = tmp_path / 'ips.xlsx'
