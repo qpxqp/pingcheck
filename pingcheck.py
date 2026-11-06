@@ -42,6 +42,7 @@ FMT_COL_NAME = '%Y-%m-%d %H:%M:%S'
 FMT_LOGGING = '%Y-%m-%d %H:%M:%S'
 # Данные этого столбца будут добавлены в новый столбец в источник
 APPEND_DATA = PingColumn.SUCCESS_PCT
+DEFAULT_CHUNK_SIZE = 50  # 0 или меньше — без разбивки
 
 LOG_NO_RESULTS = 'Нет результатов для записи'
 
@@ -117,37 +118,55 @@ def read_ips_from_excel(path: Path, column: str) -> tuple[str, ...]:
     return tuple(ips)
 
 
+def chunked(lst: list, size: int):
+    """Делит список на чанки указанного размера."""
+    for i in range(0, len(lst), size):
+        yield lst[i:i + size]
+
+
 def safe_ping_hosts(
     addresses: list[str],
     *,
     count: int,
     timeout: int,
     privileged: bool,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
 ) -> tuple[list[Any | None], list[str | None]]:
     """Пингует список. Сначала multiping, при сбое — поштучно."""
     addresses_count = len(addresses)
-    try:
-        hosts = multiping(
-            addresses=addresses,
-            count=count,
-            timeout=timeout,
-            privileged=privileged,
-        )
-        return list(hosts), [None] * addresses_count
-    except ICMPLibError as e:
-        logger.warning(
-            'Групповой пинг не выполнен (%s), пинг поштучно', e,
-        )
-    hosts: list[Any | None] = [None] * addresses_count
-    errors: list[str | None] = [None] * addresses_count
-    for n, addr in enumerate(addresses):
+    if chunk_size <= 0:
+        chunk_size = addresses_count or 1
+    hosts_out: list[Any | None] = []
+    errors_out: list[str | None] = []
+    for n, chunk in enumerate(chunked(addresses, chunk_size), start=1):
+        logger.debug('Чанк %d из %d адресов',n, len(chunk))
         try:
-            hosts[n] = (
-                ping(addr, count=count, timeout=timeout, privileged=privileged)
+            hosts = multiping(
+                addresses=chunk,
+                count=count,
+                timeout=timeout,
+                privileged=privileged,
             )
+            hosts_out.extend(hosts)
+            errors_out.extend([None] * len(chunk))
+            continue
         except ICMPLibError as e:
-            errors[n] = str(e)
-    return hosts, errors
+            logger.warning(
+                'Групповой пинг не выполнен (%s), '
+                'пинг поштучно для чанка номер %d из %d адресов',
+                e, n, len(chunk)
+            )
+        for addr in chunk:
+            try:
+                hosts_out.append(
+                    ping(addr, count=count, timeout=timeout,
+                         privileged=privileged)
+                )
+                errors_out.append(None)
+            except ICMPLibError as e:
+                hosts_out.append(None)
+                errors_out.append(str(e))
+    return hosts_out, errors_out
 
 
 def ping_ips(
@@ -157,6 +176,7 @@ def ping_ips(
     timeout: int = DEFAULT_PING_TIMEOUT,
     privileged: bool = True,
     verbose: bool = False,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
 ) -> tuple[dict, ...]:
     """Пингует IP-адреса и возвращает кортеж словарей."""
     if not ips:
@@ -165,12 +185,17 @@ def ping_ips(
     normalized = [normalize_ip(ip) for ip in ips]
     logger.info('Пинг %d адресов...', len(ips))
     hosts, errors = safe_ping_hosts(
-        normalized, count=count, timeout=timeout, privileged=privileged,
+        normalized,
+        count=count,
+        timeout=timeout,
+        privileged=privileged,
+        chunk_size=chunk_size,
     )
     results: list[dict] = []
     success = 0
     failed = 0
     log = logger.info if verbose else logger.debug
+    log('Результаты:')
     for orig, norm, host, err in zip(
         ips, normalized, hosts, errors, strict=True,
     ):
@@ -352,6 +377,15 @@ def parse_args() -> argparse.Namespace:
         action='store_true',
         help='Показывать результат по каждому IP в логе',
     )
+    parser.add_argument(
+        '--chunk-size',
+        type=int,
+        default=DEFAULT_CHUNK_SIZE,
+        help=(
+            f'Размер чанка для группового пинга адресов '
+            f'(по умолчанию: {DEFAULT_CHUNK_SIZE}, 0 — без разбивки)'
+        ),
+    )
     return parser.parse_args()
 
 
@@ -370,6 +404,7 @@ def main() -> int:
             timeout=args.timeout,
             privileged=args.privileged,
             verbose=args.verbose,
+            chunk_size=args.chunk_size,
         )
         if not results:
             logger.warning(LOG_NO_RESULTS)
