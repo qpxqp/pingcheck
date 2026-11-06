@@ -1,13 +1,15 @@
 """Пинг IP-адресов из Excel-файла с сохранением результатов."""
 import argparse
+import ipaddress
 import logging
 import sys
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
-from icmplib import multiping
+from icmplib import multiping, ping
 from icmplib.exceptions import ICMPLibError
 
 
@@ -89,6 +91,15 @@ def normalize_ip(ip: str) -> str:
         return ip
 
 
+def is_ip_literal(target: str) -> bool:
+    """True, если target — IP-литерал (v4 или v6), а не hostname."""
+    try:
+        ipaddress.ip_address(target)
+    except ValueError:
+        return False
+    return True
+
+
 def read_ips_from_excel(path: Path, column: str) -> tuple[str, ...]:
     """Читает IP-адреса из указанного столбца Excel-файла.
 
@@ -106,6 +117,39 @@ def read_ips_from_excel(path: Path, column: str) -> tuple[str, ...]:
     return tuple(ips)
 
 
+def safe_ping_hosts(
+    addresses: list[str],
+    *,
+    count: int,
+    timeout: int,
+    privileged: bool,
+) -> tuple[list[Any | None], list[str | None]]:
+    """Пингует список. Сначала multiping, при сбое — поштучно."""
+    addresses_count = len(addresses)
+    try:
+        hosts = multiping(
+            addresses=addresses,
+            count=count,
+            timeout=timeout,
+            privileged=privileged,
+        )
+        return list(hosts), [None] * addresses_count
+    except ICMPLibError as e:
+        logger.warning(
+            'Групповой пинг не выполнен (%s), пинг поштучно', e,
+        )
+    hosts: list[Any | None] = [None] * addresses_count
+    errors: list[str | None] = [None] * addresses_count
+    for n, addr in enumerate(addresses):
+        try:
+            hosts[n] = (
+                ping(addr, count=count, timeout=timeout, privileged=privileged)
+            )
+        except ICMPLibError as e:
+            errors[n] = str(e)
+    return hosts, errors
+
+
 def ping_ips(
     ips: tuple[str, ...],
     *,
@@ -120,18 +164,40 @@ def ping_ips(
         return ()
     normalized = [normalize_ip(ip) for ip in ips]
     logger.info('Пинг %d адресов...', len(ips))
-    hosts = multiping(
-        addresses=normalized,
-        count=count,
-        timeout=timeout,
-        privileged=privileged,
+    hosts, errors = safe_ping_hosts(
+        normalized, count=count, timeout=timeout, privileged=privileged,
     )
     results: list[dict] = []
     success = 0
     failed = 0
     log = logger.info if verbose else logger.debug
-    for orig, norm, host in zip(ips, normalized, hosts, strict=True):
-        if host.address != norm:
+    for orig, norm, host, err in zip(
+        ips, normalized, hosts, errors, strict=True,
+    ):
+        warnings_list: list[str] = []
+        if orig != norm:
+            warnings_list.append(
+                f'IP нормализован для пинга: `{orig}` -> `{norm}`'
+            )
+        if err is not None:
+            warnings_list.append(f'не пингуется: {err}')
+        if host is None:
+            results.append({
+                PingColumn.IP: orig,
+                PingColumn.ALIVE: False,
+                PingColumn.SUCCESS_PCT: 0,
+                PingColumn.PING_COUNT: count,
+                PingColumn.AVG_RTT: None,
+                PingColumn.MIN_RTT: None,
+                PingColumn.MAX_RTT: None,
+                PingColumn.JITTER: None,
+                PingColumn.PACKET_LOSS: None,
+                PingColumn.WARNINGS: '; '.join(warnings_list) or None,
+            })
+            failed += 1
+            log('%-20s %s', orig, f'FAIL: {err}')
+            continue
+        if is_ip_literal(norm) and host.address != norm:
             raise RuntimeError(
                 f'Порядок нарушен: ожидали `{norm}`, получили `{host.address}`'
             )
@@ -139,6 +205,8 @@ def ping_ips(
         recv = getattr(host, 'packets_received', 0)
         pct = round(recv / sent * 100) if sent else 0
         is_alive = recv > 0
+        if host.address != norm:
+            warnings_list.append(f'`{orig}` резолвлен в `{host.address}`')
         results.append({
             PingColumn.IP: orig,
             PingColumn.ALIVE: is_alive,
@@ -149,11 +217,7 @@ def ping_ips(
             PingColumn.JITTER: getattr(host, 'jitter', None),
             PingColumn.MAX_RTT: getattr(host, 'max_rtt', None),
             PingColumn.MIN_RTT: getattr(host, 'min_rtt', None),
-            PingColumn.WARNINGS: (
-                f'IP нормализован для пинга: `{orig}` -> `{norm}`'
-                if orig != norm else
-                None
-            ),
+            PingColumn.WARNINGS: '; '.join(warnings_list) or None,
         })
         if is_alive:
             success += 1
@@ -338,9 +402,9 @@ def main() -> int:
             e,
         )
         return 2
-    except ICMPLibError as e:
-        logger.error('Пинг не выполнен: %s', e)
-        return 1
+    # except ICMPLibError as e:
+    #     logger.error('Пинг не выполнен: %s', e)
+    #     return 1
     except PermissionError as e:
         logger.error(
             'Недостаточно прав доступа. '
