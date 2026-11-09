@@ -74,6 +74,7 @@ def test_safe_ping_hosts_success(monkeypatch):
         count=1, timeout=1, privileged=False, chunk_size=10
     )
     assert len(hosts) == 2
+    assert hosts[0] is not None
     assert hosts[0].address == '8.8.8.8'
     assert errors == [None, None]
 
@@ -96,6 +97,7 @@ def test_safe_ping_hosts_fallback(monkeypatch):
         count=1, timeout=1, privileged=False, chunk_size=10
     )
     assert len(hosts) == 2
+    assert hosts[0] is not None
     assert hosts[0].address == '8.8.8.8'
     assert hosts[1] is None
     assert errors[0] is None

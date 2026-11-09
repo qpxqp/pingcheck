@@ -31,6 +31,7 @@ IN_USE_MARKER = '====='
 BASE_DIR = Path(__file__).parent
 RESULTS_DIR_NAME = 'results'
 RESULTS_DIR = BASE_DIR / RESULTS_DIR_NAME
+DEFAULT_LOG_FILE = Path(__file__).with_suffix('.log')
 TMP_MARKER = '.tmp'
 DEFAULT_INPUT_FILE = BASE_DIR / 'ips.xlsx'
 DEFAULT_COLUMN_NAME = PingColumn.IP.value
@@ -40,6 +41,7 @@ DEFAULT_PING_TIMEOUT = 2
 FMT_OUTPUT_FILENAME = '%Y-%m-%d_%H-%M-%S'
 FMT_COL_NAME = '%Y-%m-%d %H:%M:%S'
 FMT_LOGGING = '%Y-%m-%d %H:%M:%S'
+FMT_LOG_PING = '%-20s %s'
 # Данные этого столбца будут добавлены в новый столбец в источник
 APPEND_DATA = PingColumn.SUCCESS_PCT
 DEFAULT_CHUNK_SIZE = 50  # 0 или меньше — без разбивки
@@ -51,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 
 def setup_logging(
-    log_path: Path,
+    log_path: Path | None,
     log_level: int = logging.INFO,
 ) -> None:
     """Настраивает логирование: консоль + файл (дописывание)."""
@@ -61,16 +63,15 @@ def setup_logging(
     )
     root = logging.getLogger()
     root.setLevel(log_level)
-    # консоль
     console = logging.StreamHandler()
     console.setFormatter(fmt)
     root.addHandler(console)
-    # файл (дописывание)
-    file_handler = logging.FileHandler(
-        log_path, mode='a', encoding='utf-8',
-    )
-    file_handler.setFormatter(fmt)
-    root.addHandler(file_handler)
+    if log_path is not None:
+        file_handler = logging.FileHandler(
+            log_path, mode='a', encoding='utf-8',
+        )
+        file_handler.setFormatter(fmt)
+        root.addHandler(file_handler)
 
 
 def make_output_filename(timestamp: datetime) -> str:
@@ -220,7 +221,7 @@ def ping_ips(
                 PingColumn.WARNINGS: '; '.join(warnings_list) or None,
             })
             failed += 1
-            log('%-20s %s', orig, f'FAIL: {err}')
+            log(FMT_LOG_PING, orig, f'FAIL: {err}')
             continue
         if is_ip_literal(norm) and host.address != norm:
             raise RuntimeError(
@@ -250,7 +251,7 @@ def ping_ips(
         else:
             failed += 1
             is_alive_msg = 'FAIL'
-        log('%-20s %s', orig, is_alive_msg)
+        log(FMT_LOG_PING, orig, is_alive_msg)
     logger.info('Успешно: %d', success)
     logger.info('Неуспешно: %d', failed)
     return tuple(results)
@@ -386,6 +387,11 @@ def parse_args() -> argparse.Namespace:
             f'(по умолчанию: {DEFAULT_CHUNK_SIZE}, 0 — без разбивки)'
         ),
     )
+    parser.add_argument(
+        '--no-log-file',
+        action='store_true',
+        help=f'Не записывать лог в файл `{DEFAULT_LOG_FILE}`',
+    )
     return parser.parse_args()
 
 
@@ -394,6 +400,8 @@ def main() -> int:
     args = parse_args()
     input_file = args.input_file
     column = args.column
+    log_path = None if args.no_log_file else DEFAULT_LOG_FILE
+    setup_logging(log_path)
     timestamp = datetime.now()
     logger.info('%s Process started %s', IN_USE_MARKER, IN_USE_MARKER)
     try:
@@ -416,13 +424,13 @@ def main() -> int:
             )
         else:
             logger.info(
-                'Запись отчёта в `results/...` отключена (--no-report)'
+                'Запись отчёта в `results/...` отключена'
             )
         if args.append_source:
             append_result_to_source(input_file, column, results, timestamp)
         else:
             logger.info(
-                'Запись в исходный файл отключена (--no-append-source)'
+                'Запись в исходный файл отключена'
             )
     except FileNotFoundError:
         logger.error('Файл не найден: `%s`', input_file)
@@ -437,9 +445,6 @@ def main() -> int:
             e,
         )
         return 2
-    # except ICMPLibError as e:
-    #     logger.error('Пинг не выполнен: %s', e)
-    #     return 1
     except PermissionError as e:
         logger.error(
             'Недостаточно прав доступа. '
@@ -460,5 +465,4 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    setup_logging(Path(__file__).with_suffix('.log'))
     sys.exit(main())
